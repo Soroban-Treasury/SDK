@@ -51,7 +51,7 @@ const treasury = await TreasuryClient.create({
 });
 ```
 
-This deploys the contract and calls `initialize` in two transactions. Limits are set at creation because changing them later needs several owners to authorize one call (see below).
+This deploys the contract in one transaction. The owners, threshold and limits go to the contract's constructor, so setup happens at deployment and nobody can initialize the treasury before you. Limits are set at creation because changing them later needs several owners to authorize one call (see below).
 
 ### Mainnet
 
