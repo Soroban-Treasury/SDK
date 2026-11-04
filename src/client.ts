@@ -179,42 +179,34 @@ export class TreasuryClient {
   }
 
   /**
-   * Deploy a new treasury from an uploaded WASM and initialize it.
-   * Two transactions: deploy, then `initialize`. Returns a client for the new contract.
+   * Deploy a new treasury from an uploaded WASM. The owners, threshold and starting limits go to the
+   * contract's constructor, so setup happens in the same transaction as deployment and nobody can
+   * initialize it first. Returns a client for the new contract.
    */
   static async create(options: CreateTreasuryOptions): Promise<TreasuryClient> {
     if (!/^[0-9a-fA-F]{64}$/.test(options.wasmHash)) {
       throw new InvalidInputError("wasmHash must be 64 hex characters.");
     }
+    if (options.owners.length === 0) throw new InvalidInputError("At least one owner is required.");
+    if (!Number.isInteger(options.threshold) || options.threshold < 1 || options.threshold > options.owners.length) {
+      throw new InvalidInputError("threshold must be between 1 and the number of owners.");
+    }
+    const constructorArgs = [
+      addressVec(options.owners),
+      nativeToScVal(options.threshold, { type: "u32" }),
+      xdr.ScVal.scvVec((options.limits ?? []).map(limitInit)),
+    ];
     const server = resolveServer(options);
     const deploy = Operation.createCustomContract({
       address: new Address(options.signer.publicKey),
       wasmHash: Buffer.from(options.wasmHash, "hex"),
       salt: Buffer.from(crypto.getRandomValues(new Uint8Array(32))),
+      constructorArgs,
     });
     const { returnValue } = await submit(server, options, options.signer, deploy);
     if (!returnValue) throw new TransactionFailedError("Deploy returned no contract address.");
     const contractId = Address.fromScVal(returnValue).toString();
-
-    const client = new TreasuryClient({ ...options, contractId, server });
-    await client.initialize(options.owners, options.threshold, options.limits ?? []);
-    return client;
-  }
-
-  /**
-   * Set owners, threshold and starting spending limits. Called by {@link TreasuryClient.create};
-   * once per treasury.
-   */
-  async initialize(owners: string[], threshold: number, limits: LimitInit[] = []): Promise<TxResult> {
-    if (owners.length === 0) throw new InvalidInputError("At least one owner is required.");
-    if (!Number.isInteger(threshold) || threshold < 1 || threshold > owners.length) {
-      throw new InvalidInputError("threshold must be between 1 and the number of owners.");
-    }
-    return this.write("initialize", [
-      addressVec(owners),
-      nativeToScVal(threshold, { type: "u32" }),
-      xdr.ScVal.scvVec(limits.map(limitInit)),
-    ]);
+    return new TreasuryClient({ ...options, contractId, server });
   }
 
   /** Propose a payment. The signer must be an owner. Returns the new proposal id. */

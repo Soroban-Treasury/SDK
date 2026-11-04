@@ -321,11 +321,6 @@ describe("input validation", () => {
     ).rejects.toBeInstanceOf(InvalidInputError);
   });
 
-  it("rejects a bad threshold", async () => {
-    const c = client(fakeServer());
-    await expect(c.initialize([alice.publicKey()], 2)).rejects.toBeInstanceOf(InvalidInputError);
-    await expect(c.initialize([], 1)).rejects.toBeInstanceOf(InvalidInputError);
-  });
 
   it("create rejects a bad wasm hash", async () => {
     await expect(
@@ -341,31 +336,79 @@ describe("input validation", () => {
   });
 });
 
-describe("initialize", () => {
-  it("sends owners, threshold and limits", async () => {
-    const server = fakeServer();
-    await client(server).initialize([alice.publicKey(), bob.publicKey()], 2, [
-      { asset: ASSET, limit: 1000n, periodSeconds: 86400 },
-    ]);
+describe("create", () => {
+  const owners = () => [alice.publicKey(), bob.publicKey()];
+  const wasmHash = "ab".repeat(32);
+
+  it("deploys with the constructor arguments in one transaction", async () => {
+    const server = fakeServer({
+      pollTransaction: vi.fn(async () => ({
+        status: "SUCCESS",
+        returnValue: nativeToScVal(CONTRACT, { type: "address" }),
+      })),
+    });
+    const treasury = await TreasuryClient.create({
+      networkPassphrase: Networks.TESTNET,
+      server,
+      wasmHash,
+      signer: keypairSigner(alice),
+      owners: owners(),
+      threshold: 2,
+      limits: [{ asset: ASSET, limit: 1000n, periodSeconds: 86400 }],
+    });
+    expect(treasury.contractId).toBe(CONTRACT);
+    expect(server.sendTransaction).toHaveBeenCalledTimes(1);
+
     const sent = server.sendTransaction.mock.calls[0]![0] as Transaction;
-    const { name, args } = callOf(sent);
-    expect(name).toBe("initialize");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const create = (sent.operations[0] as any).func.createContractV2;
+    const args = create.constructorArgs as xdr.ScVal[];
     expect(args).toHaveLength(3);
+    expect(scValToNative(args[0]!)).toEqual(owners());
     expect(scValToNative(args[1]!)).toBe(2);
     expect(scValToNative(args[2]!)).toEqual([{ asset: ASSET, limit: 1000n, period: 86400n }]);
   });
 
   it("defaults to no limits", async () => {
-    const server = fakeServer();
-    await client(server).initialize([alice.publicKey()], 1);
+    const server = fakeServer({
+      pollTransaction: vi.fn(async () => ({
+        status: "SUCCESS",
+        returnValue: nativeToScVal(CONTRACT, { type: "address" }),
+      })),
+    });
+    await TreasuryClient.create({
+      networkPassphrase: Networks.TESTNET,
+      server,
+      wasmHash,
+      signer: keypairSigner(alice),
+      owners: owners(),
+      threshold: 1,
+    });
     const sent = server.sendTransaction.mock.calls[0]![0] as Transaction;
-    expect(scValToNative(callOf(sent).args[2]!)).toEqual([]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const args = (sent.operations[0] as any).func.createContractV2.constructorArgs as xdr.ScVal[];
+    expect(scValToNative(args[2]!)).toEqual([]);
   });
 
-  it("rejects a bad limit before sending", async () => {
+  it("rejects bad input before sending anything", async () => {
     const server = fakeServer();
+    const base = { networkPassphrase: Networks.TESTNET, server, wasmHash, signer: keypairSigner(alice) };
+    await expect(TreasuryClient.create({ ...base, owners: [], threshold: 1 })).rejects.toBeInstanceOf(
+      InvalidInputError,
+    );
+    await expect(TreasuryClient.create({ ...base, owners: owners(), threshold: 3 })).rejects.toBeInstanceOf(
+      InvalidInputError,
+    );
+    await expect(TreasuryClient.create({ ...base, owners: owners(), threshold: 0 })).rejects.toBeInstanceOf(
+      InvalidInputError,
+    );
     await expect(
-      client(server).initialize([alice.publicKey()], 1, [{ asset: ASSET, limit: 0, periodSeconds: 60 }]),
+      TreasuryClient.create({
+        ...base,
+        owners: owners(),
+        threshold: 1,
+        limits: [{ asset: ASSET, limit: 0, periodSeconds: 60 }],
+      }),
     ).rejects.toBeInstanceOf(InvalidInputError);
     expect(server.sendTransaction).not.toHaveBeenCalled();
   });
