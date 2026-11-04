@@ -19,7 +19,7 @@ import {
   rpc,
   scValToNative,
 } from "@stellar/stellar-sdk";
-import { OverLimitError, TreasuryClient, keypairSigner } from "../dist/index.js";
+import { NotEnoughApprovalsError, OverLimitError, TreasuryClient, keypairSigner } from "../dist/index.js";
 
 const RPC_URL = process.env.RPC_URL ?? "https://soroban-testnet.stellar.org";
 const WASM = process.env.WASM ?? new URL("../../contract/target/wasm32v1-none/release/treasury_contract.wasm", import.meta.url);
@@ -61,20 +61,21 @@ const uploaded = await send(alice, Operation.uploadContractWasm({ wasm: readFile
 const wasmHash = Buffer.from(scValToNative(uploaded.returnValue)).toString("hex");
 console.log("wasm hash", wasmHash);
 
-step("Create treasury (owners: alice, bob; threshold 1)");
+step("Create treasury (owners: alice, bob; threshold 2; limit 50 XLM per hour)");
 const common = { rpcUrl: RPC_URL, networkPassphrase: Networks.TESTNET };
+const xlm = Asset.native().contractId(Networks.TESTNET);
 const treasury = await TreasuryClient.create({
   ...common,
   wasmHash,
   signer: keypairSigner(alice),
   owners: [alice.publicKey(), bob.publicKey()],
-  threshold: 1,
+  threshold: 2,
+  limits: [{ asset: xlm, limit: 50n * XLM, periodSeconds: 3600 }],
 });
 console.log("treasury", treasury.contractId);
 console.log("config  ", await treasury.getConfig());
 
 step("Fund the treasury with 100 XLM");
-const xlm = Asset.native().contractId(Networks.TESTNET);
 await send(
   alice,
   new Contract(xlm).call(
@@ -85,14 +86,22 @@ await send(
   ),
 );
 
-step("Set a limit of 50 XLM per hour");
-await treasury.setSpendLimit({ approvers: [alice.publicKey()], asset: xlm, limit: 50n * XLM, periodSeconds: 3600 });
+step("Check the starting limit");
 console.log("limit   ", await treasury.getSpendLimit(xlm));
 console.log("assets  ", await treasury.getPolicyAssets());
 
-step("Propose 10 XLM to bob, approve as bob, execute as alice");
+step("Propose 10 XLM to bob as alice, approve as bob, execute as alice (2 of 2)");
 const { value: id } = await treasury.propose({ asset: xlm, to: bob.publicKey(), amount: 10n * XLM, ttlSeconds: 3600 });
 console.log("proposal id", id);
+
+try {
+  await treasury.execute(id);
+  throw new Error("expected NotEnoughApprovalsError");
+} catch (error) {
+  if (!(error instanceof NotEnoughApprovalsError)) throw error;
+  console.log("1 of 2 approvals, execute refused:", error.message);
+}
+
 const asBob = new TreasuryClient({ ...common, contractId: treasury.contractId, signer: keypairSigner(bob) });
 await asBob.approve(id);
 console.log("approvals ", (await treasury.getProposal(id)).approvals.length);

@@ -6,6 +6,7 @@ export * from "./errors.js";
 export type {
   Amount,
   Config,
+  LimitInit,
   ListProposalsParams,
   Proposal,
   ProposeParams,

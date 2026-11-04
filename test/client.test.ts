@@ -257,6 +257,52 @@ describe("write calls", () => {
   });
 });
 
+describe("network retries", () => {
+  const withRetries = (server: RpcLike, extra = {}) =>
+    new TreasuryClient({
+      contractId: CONTRACT,
+      networkPassphrase: Networks.TESTNET,
+      server,
+      signer: keypairSigner(alice),
+      retryDelayMs: 1,
+      ...extra,
+    });
+
+  it("retries polling after a network error", async () => {
+    const poll = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("fetch failed"))
+      .mockResolvedValueOnce({ status: "SUCCESS", returnValue: xdr.ScVal.scvVoid() });
+    const result = await withRetries(fakeServer({ pollTransaction: poll })).execute(1);
+    expect(result.hash).toBe("abc123");
+    expect(poll).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a read after a network error", async () => {
+    const sim = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("fetch failed"))
+      .mockResolvedValueOnce({ result: { retval: nativeToScVal(4n, { type: "u64" }) } });
+    expect(await withRetries(fakeServer({ simulateTransaction: sim })).proposalCount()).toBe(4n);
+  });
+
+  it("gives up after the retries", async () => {
+    const sim = vi.fn().mockRejectedValue(new Error("fetch failed"));
+    await expect(withRetries(fakeServer({ simulateTransaction: sim }), { retries: 2 }).proposalCount()).rejects.toThrow(
+      "fetch failed",
+    );
+    expect(sim).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry a contract error", async () => {
+    const sim = vi.fn(async () => ({ error: "Error(Contract, #6)" }));
+    await expect(withRetries(fakeServer({ simulateTransaction: sim })).proposalCount()).rejects.toBeInstanceOf(
+      NotOwnerError,
+    );
+    expect(sim).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("input validation", () => {
   it("rejects bad amounts before touching the network", async () => {
     const server = fakeServer();
@@ -292,6 +338,36 @@ describe("input validation", () => {
         server: fakeServer(),
       }),
     ).rejects.toBeInstanceOf(InvalidInputError);
+  });
+});
+
+describe("initialize", () => {
+  it("sends owners, threshold and limits", async () => {
+    const server = fakeServer();
+    await client(server).initialize([alice.publicKey(), bob.publicKey()], 2, [
+      { asset: ASSET, limit: 1000n, periodSeconds: 86400 },
+    ]);
+    const sent = server.sendTransaction.mock.calls[0]![0] as Transaction;
+    const { name, args } = callOf(sent);
+    expect(name).toBe("initialize");
+    expect(args).toHaveLength(3);
+    expect(scValToNative(args[1]!)).toBe(2);
+    expect(scValToNative(args[2]!)).toEqual([{ asset: ASSET, limit: 1000n, period: 86400n }]);
+  });
+
+  it("defaults to no limits", async () => {
+    const server = fakeServer();
+    await client(server).initialize([alice.publicKey()], 1);
+    const sent = server.sendTransaction.mock.calls[0]![0] as Transaction;
+    expect(scValToNative(callOf(sent).args[2]!)).toEqual([]);
+  });
+
+  it("rejects a bad limit before sending", async () => {
+    const server = fakeServer();
+    await expect(
+      client(server).initialize([alice.publicKey()], 1, [{ asset: ASSET, limit: 0, periodSeconds: 60 }]),
+    ).rejects.toBeInstanceOf(InvalidInputError);
+    expect(server.sendTransaction).not.toHaveBeenCalled();
   });
 });
 

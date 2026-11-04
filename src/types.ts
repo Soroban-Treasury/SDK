@@ -34,6 +34,16 @@ export interface TxResult<T = undefined> {
   value: T;
 }
 
+/** A spending limit to set when the treasury is created. */
+export interface LimitInit {
+  /** Token contract id. */
+  asset: string;
+  /** Most that can be spent per period, in the asset's smallest unit. */
+  limit: Amount;
+  /** Period length in seconds. */
+  periodSeconds: number;
+}
+
 export interface ProposeParams {
   asset: string;
   to: string;

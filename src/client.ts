@@ -25,6 +25,7 @@ import type { Signer } from "./signer.js";
 import type {
   Amount,
   Config,
+  LimitInit,
   ListProposalsParams,
   Proposal,
   ProposeParams,
@@ -65,6 +66,10 @@ export interface TreasuryClientOptions {
   pollAttempts?: number;
   /** Allow `http://` RPC URLs (local dev). Default false. */
   allowHttp?: boolean;
+  /** Extra tries for RPC calls that fail on the network (reads and polling). Default 3. */
+  retries?: number;
+  /** Wait before the first retry in ms, doubled each time. Default 300. */
+  retryDelayMs?: number;
 }
 
 export interface CreateTreasuryOptions extends Omit<TreasuryClientOptions, "contractId" | "signer"> {
@@ -73,6 +78,8 @@ export interface CreateTreasuryOptions extends Omit<TreasuryClientOptions, "cont
   signer: Signer;
   owners: string[];
   threshold: number;
+  /** Starting spending limits. Assets without a limit cannot be spent. */
+  limits?: LimitInit[];
 }
 
 const DEFAULT_PROPOSAL_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -108,6 +115,18 @@ const u64 = (value: Amount, name: string): xdr.ScVal => {
   return nativeToScVal(n, { type: "u64" });
 };
 
+/** A `LimitInit` struct: a map with symbol keys in alphabetical order, as Soroban requires. */
+const limitInit = (init: LimitInit): xdr.ScVal => {
+  const entries: [string, xdr.ScVal][] = [
+    ["asset", address(init.asset)],
+    ["limit", i128(init.limit, "limit")],
+    ["period", u64(init.periodSeconds, "periodSeconds")],
+  ];
+  return xdr.ScVal.scvMap(
+    entries.map(([key, val]) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(key), val })),
+  );
+};
+
 const addressVec = (values: string[]): xdr.ScVal => xdr.ScVal.scvVec(values.map(address));
 
 const isSimulationError = (sim: unknown): sim is { error: string } =>
@@ -141,6 +160,7 @@ export class TreasuryClient {
   private readonly fee: string;
   private readonly timeoutSeconds: number;
   private readonly pollAttempts: number;
+  private readonly retry: RetryOptions;
 
   constructor(options: TreasuryClientOptions) {
     this.contractId = options.contractId;
@@ -150,6 +170,7 @@ export class TreasuryClient {
     this.fee = options.fee ?? BASE_FEE;
     this.timeoutSeconds = options.timeoutSeconds ?? 60;
     this.pollAttempts = options.pollAttempts ?? 30;
+    this.retry = { retries: options.retries, retryDelayMs: options.retryDelayMs };
     try {
       this.contract = new Contract(options.contractId);
     } catch (cause) {
@@ -176,17 +197,24 @@ export class TreasuryClient {
     const contractId = Address.fromScVal(returnValue).toString();
 
     const client = new TreasuryClient({ ...options, contractId, server });
-    await client.initialize(options.owners, options.threshold);
+    await client.initialize(options.owners, options.threshold, options.limits ?? []);
     return client;
   }
 
-  /** Set owners and threshold. Called by {@link TreasuryClient.create}; once per treasury. */
-  async initialize(owners: string[], threshold: number): Promise<TxResult> {
+  /**
+   * Set owners, threshold and starting spending limits. Called by {@link TreasuryClient.create};
+   * once per treasury.
+   */
+  async initialize(owners: string[], threshold: number, limits: LimitInit[] = []): Promise<TxResult> {
     if (owners.length === 0) throw new InvalidInputError("At least one owner is required.");
     if (!Number.isInteger(threshold) || threshold < 1 || threshold > owners.length) {
       throw new InvalidInputError("threshold must be between 1 and the number of owners.");
     }
-    return this.write("initialize", [addressVec(owners), nativeToScVal(threshold, { type: "u32" })]);
+    return this.write("initialize", [
+      addressVec(owners),
+      nativeToScVal(threshold, { type: "u32" }),
+      xdr.ScVal.scvVec(limits.map(limitInit)),
+    ]);
   }
 
   /** Propose a payment. The signer must be an owner. Returns the new proposal id. */
@@ -280,7 +308,7 @@ export class TreasuryClient {
   async simulate(method: string, args: xdr.ScVal[] = []): Promise<unknown> {
     const source = new Account(this.signer?.publicKey ?? READ_ONLY_SOURCE, "0");
     const tx = this.buildTx(source, this.contract.call(method, ...args));
-    const sim = await this.server.simulateTransaction(tx);
+    const sim = await withRetry(this.retry, () => this.server.simulateTransaction(tx));
     if (isSimulationError(sim)) throw simulationFailure(sim.error);
     const retval = (sim as { result?: { retval?: xdr.ScVal } }).result?.retval;
     return retval ? scValToNative(retval) : undefined;
@@ -299,6 +327,7 @@ export class TreasuryClient {
         fee: this.fee,
         timeoutSeconds: this.timeoutSeconds,
         pollAttempts: this.pollAttempts,
+        ...this.retry,
       },
       signer,
       this.contract.call(method, ...args),
@@ -319,6 +348,25 @@ export class TreasuryClient {
   }
 }
 
+interface RetryOptions {
+  retries?: number;
+  retryDelayMs?: number;
+}
+
+/** Run an idempotent RPC call again if it throws, for network blips. */
+async function withRetry<T>(options: RetryOptions, fn: () => Promise<T>): Promise<T> {
+  const retries = options.retries ?? 3;
+  const delay = options.retryDelayMs ?? 300;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= retries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delay * 2 ** attempt));
+    }
+  }
+}
+
 function resolveServer(options: { server?: RpcLike; rpcUrl?: string; allowHttp?: boolean }): RpcLike {
   if (options.server) return options.server;
   if (!options.rpcUrl) throw new ConfigError("Pass either `rpcUrl` or `server`.");
@@ -329,7 +377,7 @@ function simulationFailure(message: string): StellarTreasuryError {
   return parseContractError(message) ?? new SimulationError(message);
 }
 
-interface SubmitContext {
+interface SubmitContext extends RetryOptions {
   networkPassphrase: string;
   fee?: string;
   timeoutSeconds?: number;
@@ -343,7 +391,7 @@ async function submit(
   signer: Signer,
   op: xdr.Operation,
 ): Promise<{ hash: string; returnValue?: xdr.ScVal }> {
-  const account = await server.getAccount(signer.publicKey);
+  const account = await withRetry(ctx, () => server.getAccount(signer.publicKey));
   const tx = new TransactionBuilder(account as unknown as Account, {
     fee: ctx.fee ?? BASE_FEE,
     networkPassphrase: ctx.networkPassphrase,
@@ -374,7 +422,7 @@ async function submit(
     throw new TransactionFailedError(`The network rejected the transaction (${sent.status}).`, sent.hash);
   }
 
-  const done = await server.pollTransaction(sent.hash, { attempts: ctx.pollAttempts ?? 30 });
+  const done = await withRetry(ctx, () => server.pollTransaction(sent.hash, { attempts: ctx.pollAttempts ?? 30 }));
   if (done.status === "SUCCESS") return { hash: sent.hash, returnValue: done.returnValue };
   if (done.status === "NOT_FOUND") {
     throw new TransactionTimeoutError("The transaction was not confirmed in time.", sent.hash);

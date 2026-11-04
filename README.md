@@ -46,12 +46,14 @@ const treasury = await TreasuryClient.create({
   signer,
   owners: ["G...", "G...", "G..."],
   threshold: 2,
+  // An asset can only be spent once it has a limit, so set the starting limits here.
+  limits: [{ asset: "C...", limit: 50_000_000_000n, periodSeconds: 24 * 3600 }],
   rpcUrl,
   networkPassphrase: Networks.TESTNET,
 });
 ```
 
-This deploys the contract and calls `initialize` in two transactions.
+This deploys the contract and calls `initialize` in two transactions. Limits are set at creation because changing them later needs several owners to authorize one call (see below).
 
 ## Signers
 
@@ -78,8 +80,10 @@ Write calls simulate first, so contract errors are thrown before the user is ask
 
 ## Limits of this version
 
-- `setSpendLimit` and `removeSpendLimit` need authorization from `threshold` owners. The client attaches only the signer's authorization, so they work when the signer alone satisfies the threshold. Collecting other owners' signatures is not built yet.
+- `setSpendLimit` and `removeSpendLimit` change limits after creation. They need authorization from `threshold` owners in one call, and the client only attaches the signer's own authorization, so they work when the signer alone meets the threshold. Collecting other owners' signatures is not built yet. Set the limits you need when you create the treasury.
 - Contract bindings are written by hand, not generated.
+
+Network errors on reads, polling and account lookups are retried (`retries`, default 3). Sending a transaction is not retried.
 
 ## Develop
 
@@ -88,3 +92,7 @@ npm install
 npm test
 npm run build
 ```
+
+### Try it on testnet
+
+`scripts/e2e-testnet.mjs` deploys the contract with two throwaway accounts and runs the whole flow (2 of 2 approval, spending limit, errors) through this SDK.
