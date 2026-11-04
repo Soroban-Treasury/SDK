@@ -2,8 +2,6 @@
 
 TypeScript client for the Stellar Treasury contract: create a treasury, propose a payment, approve, execute, and list proposals. ESM and CJS, fully typed.
 
-> The contract is unaudited and for testnet only.
-
 ```
 npm install treasury-sdk @stellar/stellar-sdk
 ```
@@ -54,6 +52,10 @@ const treasury = await TreasuryClient.create({
 ```
 
 This deploys the contract and calls `initialize` in two transactions. Limits are set at creation because changing them later needs several owners to authorize one call (see below).
+
+### Mainnet
+
+Use your mainnet RPC URL and `Networks.PUBLIC` as `networkPassphrase`. Nothing else changes.
 
 ## Signers
 
