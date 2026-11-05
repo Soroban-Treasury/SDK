@@ -86,6 +86,13 @@ const DEFAULT_PROPOSAL_TTL_SECONDS = 7 * 24 * 60 * 60;
 /** A valid account that is only used as the source of read-only simulations. */
 const READ_ONLY_SOURCE = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
+/** Hex text to bytes, without Node's Buffer so the SDK also runs in a browser. */
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return bytes;
+}
+
 const address = (value: string): xdr.ScVal => {
   try {
     return new Address(value).toScVal();
@@ -199,8 +206,8 @@ export class TreasuryClient {
     const server = resolveServer(options);
     const deploy = Operation.createCustomContract({
       address: new Address(options.signer.publicKey),
-      wasmHash: Buffer.from(options.wasmHash, "hex"),
-      salt: Buffer.from(crypto.getRandomValues(new Uint8Array(32))),
+      wasmHash: hexToBytes(options.wasmHash),
+      salt: crypto.getRandomValues(new Uint8Array(32)),
       constructorArgs,
     });
     const { returnValue } = await submit(server, options, options.signer, deploy);
