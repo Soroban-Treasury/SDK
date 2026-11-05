@@ -28,7 +28,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "demo": "node scripts/e2e-testnet.mjs"
   },
   "engines": {
     "node": ">=20"
