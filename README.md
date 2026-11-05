@@ -97,4 +97,4 @@ npm run build
 
 ### Try it on testnet
 
-`scripts/e2e-testnet.mjs` deploys the contract with two throwaway accounts and runs the whole flow (2 of 2 approval, spending limit, errors) through this SDK.
+`npm run demo` (which runs `scripts/e2e-testnet.mjs`) deploys the contract with two throwaway accounts and runs the whole flow (2 of 2 approval, spending limit, errors) through this SDK.
