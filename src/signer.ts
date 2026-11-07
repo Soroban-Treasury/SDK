@@ -28,3 +28,6 @@ export function keypairSigner(keypair: Keypair | string): Signer {
     },
   };
 }
+
+// TODO(wave: sdk-1): wallet adapters (Freighter, xBull, Albedo, Lobstr and others) that return a Signer,
+// so apps do not each wrap a wallet's sign call by hand.
