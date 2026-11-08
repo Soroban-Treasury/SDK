@@ -1,4 +1,4 @@
-export { TreasuryClient } from "./client.js";
+export { TreasuryClient, transactionDeadline } from "./client.js";
 export type { CreateTreasuryOptions, RpcLike, TreasuryClientOptions } from "./client.js";
 export { keypairSigner } from "./signer.js";
 export type { Signer } from "./signer.js";

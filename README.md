@@ -87,6 +87,8 @@ Write calls simulate first, so contract errors are thrown before the user is ask
 
 Network errors on reads, polling and account lookups are retried (`retries`, default 3). Sending a transaction is not retried.
 
+Transactions expire `timeoutSeconds` (default 60) after the close time of the network's latest ledger, not by this computer's clock, so a computer whose clock is off can still send them. For transactions you build yourself, `transactionDeadline(server, seconds)` gives the same expiry time, to pass as `timebounds: { minTime: 0, maxTime }`.
+
 ## Develop
 
 ```

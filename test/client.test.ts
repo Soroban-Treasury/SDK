@@ -1,5 +1,5 @@
 import { Account, Keypair, Networks, StrKey, Transaction, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
-import { describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
   ConfigError,
   InvalidInputError,
@@ -12,6 +12,7 @@ import {
   TreasuryClient,
   keypairSigner,
   parseContractError,
+  transactionDeadline,
   type RpcLike,
 } from "../src/index.js";
 
@@ -254,6 +255,73 @@ describe("write calls", () => {
       },
     });
     await expect(c.execute(1)).rejects.toMatchObject({ name: "SignerError" });
+  });
+});
+
+describe("transaction expiry", () => {
+  // This computer's clock is 1 Jan 2020; the network's latest ledger closed at NETWORK_NOW.
+  const LOCAL_NOW_MS = Date.UTC(2020, 0, 1);
+  const NETWORK_NOW = 1_800_000_000;
+  const withNetworkClock = (extra = {}) =>
+    fakeServer({ getLatestLedger: vi.fn(async () => ({ sequence: 1, closeTime: String(NETWORK_NOW) })), ...extra });
+  const sentMaxTime = (server: FakeServer) =>
+    Number((server.sendTransaction.mock.calls[0]![0] as Transaction).timeBounds?.maxTime);
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("counts from the network's latest ledger, not this computer's clock", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(LOCAL_NOW_MS);
+    const server = withNetworkClock();
+    await client(server).execute(1);
+    expect(sentMaxTime(server)).toBe(NETWORK_NOW + 60);
+  });
+
+  it("uses the configured timeout", async () => {
+    const server = withNetworkClock();
+    const c = new TreasuryClient({
+      contractId: CONTRACT,
+      networkPassphrase: Networks.TESTNET,
+      server,
+      signer: keypairSigner(alice),
+      timeoutSeconds: 300,
+    });
+    await c.approve(1);
+    expect(sentMaxTime(server)).toBe(NETWORK_NOW + 300);
+  });
+
+  it("falls back to this computer's clock when the server cannot say", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(LOCAL_NOW_MS);
+    const local = LOCAL_NOW_MS / 1000;
+
+    const withoutMethod = fakeServer();
+    await client(withoutMethod).execute(1);
+    expect(sentMaxTime(withoutMethod)).toBe(local + 60);
+
+    const failing = fakeServer({
+      getLatestLedger: vi.fn(async () => {
+        throw new Error("network down");
+      }),
+    });
+    await client(failing).execute(1);
+    expect(sentMaxTime(failing)).toBe(local + 60);
+  });
+
+  it("transactionDeadline gives 0 (no expiry) for a timeout of 0 and refuses a negative one", async () => {
+    expect(await transactionDeadline(withNetworkClock(), 0)).toBe(0);
+    expect(await transactionDeadline(withNetworkClock(), 30)).toBe(NETWORK_NOW + 30);
+    await expect(transactionDeadline(withNetworkClock(), -1)).rejects.toBeInstanceOf(ConfigError);
+  });
+
+  it("does not ask the network for the time on reads", async () => {
+    const server = withNetworkClock({
+      simulateTransaction: vi.fn(async () => ({ result: { retval: retvalOf(2n, "u64") } })),
+    });
+    expect(await client(server).proposalCount()).toBe(2n);
+    expect(server.getLatestLedger).not.toHaveBeenCalled();
+    const simulated = server.simulateTransaction.mock.calls[0]![0] as Transaction;
+    expect(simulated.timeBounds?.maxTime).toBe("0");
   });
 });
 

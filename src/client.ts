@@ -3,6 +3,7 @@ import {
   Address,
   Contract,
   Operation,
+  TimeoutInfinite,
   TransactionBuilder,
   BASE_FEE,
   nativeToScVal,
@@ -45,6 +46,39 @@ export interface RpcLike {
     hash: string,
     opts?: { attempts?: number; sleepStrategy?: (iter: number) => number },
   ): Promise<{ status: string; returnValue?: xdr.ScVal; resultXdr?: unknown }>;
+  /**
+   * Optional. When present, transactions expire relative to the close time of the network's latest
+   * ledger instead of this computer's clock. `rpc.Server` has it.
+   */
+  getLatestLedger?(): Promise<{ sequence: number; closeTime?: string | number }>;
+}
+
+/**
+ * When a transaction built now should stop being valid, in Unix seconds: `timeoutSeconds` after the
+ * close time of the network's latest ledger. A computer whose clock is off would otherwise build
+ * transactions that have already expired, or never do, by the time they reach the network. Falls back
+ * to this computer's clock if the server cannot say. Returns 0, meaning no expiry, for a timeout of 0.
+ *
+ * Use it as `new TransactionBuilder(account, { fee, networkPassphrase, timebounds: { minTime: 0, maxTime } })`.
+ */
+export async function transactionDeadline(
+  server: Pick<RpcLike, "getLatestLedger">,
+  timeoutSeconds = 60,
+): Promise<number> {
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) {
+    throw new ConfigError("timeoutSeconds must be 0 (no expiry) or more.");
+  }
+  if (timeoutSeconds === 0) return 0;
+  let now = Math.floor(Date.now() / 1000);
+  if (server.getLatestLedger) {
+    try {
+      const closeTime = Number((await server.getLatestLedger()).closeTime);
+      if (Number.isFinite(closeTime) && closeTime > 0) now = closeTime;
+    } catch {
+      // Use this computer's clock.
+    }
+  }
+  return now + Math.ceil(timeoutSeconds);
 }
 
 export interface TreasuryClientOptions {
@@ -60,7 +94,10 @@ export interface TreasuryClientOptions {
   server?: RpcLike;
   /** Fee per operation in stroops. Default 100. */
   fee?: string;
-  /** Transaction validity window in seconds. Default 60. */
+  /**
+   * How long a transaction stays valid, in seconds, counted from the network's latest ledger (see
+   * {@link transactionDeadline}). 0 means no expiry. Default 60.
+   */
   timeoutSeconds?: number;
   /** How many times to poll for confirmation. Default 30. */
   pollAttempts?: number;
@@ -339,10 +376,11 @@ export class TreasuryClient {
     return this.signer;
   }
 
+  /** A transaction that is only simulated, never sent, so it needs no expiry. */
   private buildTx(source: Account, op: xdr.Operation): Transaction {
     return new TransactionBuilder(source, { fee: this.fee, networkPassphrase: this.networkPassphrase })
       .addOperation(op)
-      .setTimeout(this.timeoutSeconds)
+      .setTimeout(TimeoutInfinite)
       .build();
   }
 }
@@ -390,13 +428,16 @@ async function submit(
   signer: Signer,
   op: xdr.Operation,
 ): Promise<{ hash: string; returnValue?: xdr.ScVal }> {
-  const account = await withRetry(ctx, () => server.getAccount(signer.publicKey));
+  const [account, maxTime] = await Promise.all([
+    withRetry(ctx, () => server.getAccount(signer.publicKey)),
+    transactionDeadline(server, ctx.timeoutSeconds ?? 60),
+  ]);
   const tx = new TransactionBuilder(account as unknown as Account, {
     fee: ctx.fee ?? BASE_FEE,
     networkPassphrase: ctx.networkPassphrase,
+    timebounds: { minTime: 0, maxTime },
   })
     .addOperation(op)
-    .setTimeout(ctx.timeoutSeconds ?? 60)
     .build();
 
   let prepared: Transaction;

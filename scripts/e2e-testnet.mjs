@@ -19,7 +19,13 @@ import {
   rpc,
   scValToNative,
 } from "@stellar/stellar-sdk";
-import { NotEnoughApprovalsError, OverLimitError, TreasuryClient, keypairSigner } from "../dist/index.js";
+import {
+  NotEnoughApprovalsError,
+  OverLimitError,
+  TreasuryClient,
+  keypairSigner,
+  transactionDeadline,
+} from "../dist/index.js";
 
 const RPC_URL = process.env.RPC_URL ?? "https://soroban-testnet.stellar.org";
 const WASM = process.env.WASM ?? new URL("../../contract/target/wasm32v1-none/release/treasury_contract.wasm", import.meta.url);
@@ -35,9 +41,14 @@ async function fund(keypair) {
 
 async function send(keypair, operation) {
   const account = await server.getAccount(keypair.publicKey());
-  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+  // Expire 60 s after the network's latest ledger, so a wrong local clock does not matter.
+  const maxTime = await transactionDeadline(server, 60);
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: Networks.TESTNET,
+    timebounds: { minTime: 0, maxTime },
+  })
     .addOperation(operation)
-    .setTimeout(60)
     .build();
   const prepared = await server.prepareTransaction(tx);
   prepared.sign(keypair);
