@@ -2,9 +2,15 @@
 
 TypeScript client for the Stellar Treasury contract: create a treasury, propose a payment, approve, execute, and list proposals. ESM and CJS, fully typed.
 
+**[Live demo on testnet](https://soroban-treasury.github.io/Frontend/demo/)** · Stellar Treasury repos: [Contract](https://github.com/Soroban-Treasury/Contract) · [SDK](https://github.com/Soroban-Treasury/SDK) · [Backend](https://github.com/Soroban-Treasury/Backend) · [Frontend](https://github.com/Soroban-Treasury/Frontend)
+
+It is installed from this GitHub repo, which builds it on install:
+
 ```
-npm install treasury-sdk @stellar/stellar-sdk
+npm install github:Soroban-Treasury/SDK @stellar/stellar-sdk
 ```
+
+The package name is `treasury-sdk`, so you import from `"treasury-sdk"` as below.
 
 ## Quick start
 
