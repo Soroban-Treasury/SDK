@@ -14,6 +14,7 @@ import {
 import type { Transaction } from "@stellar/stellar-sdk";
 import {
   ConfigError,
+  ContractError,
   InvalidInputError,
   SignerError,
   SimulationError,
@@ -28,11 +29,14 @@ import type {
   Config,
   LimitInit,
   ListProposalsParams,
+  PreviewOptions,
+  PreviewResult,
   Proposal,
   ProposeParams,
   RemoveSpendLimitParams,
   SetSpendLimitParams,
   SpendLimit,
+  TreasuryPreview,
   TxResult,
 } from "./types.js";
 
@@ -176,6 +180,13 @@ const addressVec = (values: string[]): xdr.ScVal => xdr.ScVal.scvVec(values.map(
 const isSimulationError = (sim: unknown): sim is { error: string } =>
   typeof sim === "object" && sim !== null && "error" in sim && typeof (sim as { error: unknown }).error === "string";
 
+function parseStroops(value: unknown): bigint {
+  if (typeof value === "bigint") return value >= 0n ? value : 0n;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value === "string" && /^\d+$/.test(value)) return BigInt(value);
+  return 0n;
+}
+
 function toProposal(raw: Record<string, unknown>): Proposal {
   return {
     id: BigInt(raw.id as bigint),
@@ -194,10 +205,17 @@ function toProposal(raw: Record<string, unknown>): Proposal {
  *
  * Read calls (`getConfig`, `getProposal`, `listProposals`, ...) only simulate.
  * Write calls (`propose`, `approve`, `execute`, ...) simulate first, then sign and submit.
+ * Write previews (`preview.propose`, `preview.execute`, ...) simulate without signing or sending.
  */
 export class TreasuryClient {
   readonly contractId: string;
   readonly networkPassphrase: string;
+  /**
+   * Simulate write calls (`propose`, `approve`, `execute`, `setSpendLimit`, `removeSpendLimit`)
+   * without requesting a signature or submitting a transaction. Returns either the expected value
+   * or a typed {@link ContractError}, plus the estimated fee in stroops.
+   */
+  readonly preview: TreasuryPreview;
   private readonly server: RpcLike;
   private readonly signer?: Signer;
   private readonly contract: Contract;
@@ -220,6 +238,50 @@ export class TreasuryClient {
     } catch (cause) {
       throw new InvalidInputError(`Not a valid contract id: ${options.contractId}`, { cause });
     }
+    this.preview = {
+      propose: async (params: ProposeParams, previewOpts?: PreviewOptions): Promise<PreviewResult<bigint>> => {
+        const caller = this.resolvePreviewSource(previewOpts, true);
+        const ttl = params.ttlSeconds ?? DEFAULT_PROPOSAL_TTL_SECONDS;
+        const args = [
+          address(caller),
+          address(params.asset),
+          address(params.to),
+          i128(params.amount, "amount"),
+          u64(ttl, "ttlSeconds"),
+        ];
+        return this.previewCall(caller, "propose", args, (raw) =>
+          raw === undefined ? 0n : BigInt(raw as bigint),
+        );
+      },
+      approve: async (id: Amount, previewOpts?: PreviewOptions): Promise<PreviewResult> => {
+        const caller = this.resolvePreviewSource(previewOpts, true);
+        const args = [address(caller), u64(id, "id")];
+        return this.previewCall(caller, "approve", args);
+      },
+      execute: async (id: Amount, previewOpts?: PreviewOptions): Promise<PreviewResult> => {
+        const caller = this.resolvePreviewSource(previewOpts, true);
+        const args = [address(caller), u64(id, "id")];
+        return this.previewCall(caller, "execute", args);
+      },
+      setSpendLimit: async (params: SetSpendLimitParams, previewOpts?: PreviewOptions): Promise<PreviewResult> => {
+        const source = this.resolvePreviewSource(previewOpts, false);
+        const args = [
+          addressVec(params.approvers),
+          address(params.asset),
+          i128(params.limit, "limit"),
+          u64(params.periodSeconds, "periodSeconds"),
+        ];
+        return this.previewCall(source, "set_spend_limit", args);
+      },
+      removeSpendLimit: async (
+        params: RemoveSpendLimitParams,
+        previewOpts?: PreviewOptions,
+      ): Promise<PreviewResult> => {
+        const source = this.resolvePreviewSource(previewOpts, false);
+        const args = [addressVec(params.approvers), address(params.asset)];
+        return this.previewCall(source, "remove_spend_limit", args);
+      },
+    };
   }
 
   /**
@@ -376,6 +438,47 @@ export class TreasuryClient {
     return this.signer;
   }
 
+  private resolvePreviewSource(options: PreviewOptions | undefined, requireOwner: boolean): string {
+    if (options?.caller !== undefined) {
+      address(options.caller);
+      try {
+        new Account(options.caller, "0");
+      } catch (cause) {
+        throw new InvalidInputError(`caller must be a Stellar account address (G...): ${options.caller}`, { cause });
+      }
+      return options.caller;
+    }
+    if (this.signer) return this.signer.publicKey;
+    if (!requireOwner) return READ_ONLY_SOURCE;
+    throw new ConfigError(
+      "This preview needs an account. Pass `signer` when creating the client, or `caller` in preview options.",
+    );
+  }
+
+  private async previewCall<T = undefined>(
+    sourceAddress: string,
+    method: string,
+    args: xdr.ScVal[],
+    mapValue?: (raw: unknown) => T,
+  ): Promise<PreviewResult<T>> {
+    const source = new Account(sourceAddress, "0");
+    const tx = this.buildTx(source, this.contract.call(method, ...args));
+    const sim = await withRetry(this.retry, () => this.server.simulateTransaction(tx));
+    const resourceFee =
+      typeof sim === "object" && sim !== null
+        ? parseStroops((sim as { minResourceFee?: unknown }).minResourceFee)
+        : 0n;
+    const fee = parseStroops(this.fee) + resourceFee;
+    if (isSimulationError(sim)) {
+      return { ok: false, error: simulationFailure(sim.error), fee, resourceFee };
+    }
+    const retval = (sim as { result?: { retval?: xdr.ScVal } } | null | undefined)?.result?.retval;
+    const raw = retval ? scValToNative(retval) : undefined;
+    const decoded = raw === null ? undefined : raw;
+    const value = (mapValue ? mapValue(decoded) : decoded) as T;
+    return { ok: true, value, fee, resourceFee };
+  }
+
   /** A transaction that is only simulated, never sent, so it needs no expiry. */
   private buildTx(source: Account, op: xdr.Operation): Transaction {
     return new TransactionBuilder(source, { fee: this.fee, networkPassphrase: this.networkPassphrase })
@@ -410,7 +513,7 @@ function resolveServer(options: { server?: RpcLike; rpcUrl?: string; allowHttp?:
   return new rpc.Server(options.rpcUrl, { allowHttp: options.allowHttp ?? false }) as unknown as RpcLike;
 }
 
-function simulationFailure(message: string): StellarTreasuryError {
+function simulationFailure(message: string): ContractError | SimulationError {
   return parseContractError(message) ?? new SimulationError(message);
 }
 

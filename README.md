@@ -86,6 +86,36 @@ Other errors: `InvalidInputError` (bad input, nothing sent), `ConfigError` (for 
 
 Write calls simulate first, so contract errors are thrown before the user is asked to sign. `treasury.simulate(method, args)` is public if you want to check a call yourself.
 
+### Preview a write call
+
+`treasury.preview` simulates any write call (`propose`, `approve`, `execute`, `setSpendLimit`, `removeSpendLimit`) without asking for a signature or sending a transaction. Instead of throwing contract errors, it returns a typed `PreviewResult` with the expected outcome and the estimated fee in stroops (`baseFee + minResourceFee`):
+
+```ts
+import { OverLimitError, NotEnoughApprovalsError } from "treasury-sdk";
+
+const preview = await treasury.preview.execute(id);
+if (!preview.ok) {
+  if (preview.error instanceof OverLimitError) {
+    console.log("Would exceed this period's spending limit");
+  } else if (preview.error instanceof NotEnoughApprovalsError) {
+    console.log("Waiting for more owner approvals");
+  } else {
+    console.log("Would fail:", preview.error.message);
+  }
+} else {
+  console.log(`Ready to execute (estimated fee: ${preview.fee} stroops)`);
+}
+
+// Works on a read-only client too by passing `caller`:
+const check = await readOnlyTreasury.preview.propose(
+  { asset: "C...", to: "G...", amount: 5_000_000n },
+  { caller: ownerPublicKey },
+);
+if (check.ok) {
+  console.log(`Next proposal id: ${check.value}, estimated fee: ${check.fee} stroops`);
+}
+```
+
 ## Limits of this version
 
 - `setSpendLimit` and `removeSpendLimit` change limits after creation. They need authorization from `threshold` owners in one call, and the client only attaches the signer's own authorization, so they work when the signer alone meets the threshold. Collecting other owners' signatures is not built yet. Set the limits you need when you create the treasury.
