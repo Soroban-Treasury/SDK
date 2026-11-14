@@ -8,10 +8,13 @@ export type {
   Config,
   LimitInit,
   ListProposalsParams,
+  PreviewOptions,
+  PreviewResult,
   Proposal,
   ProposeParams,
   RemoveSpendLimitParams,
   SetSpendLimitParams,
   SpendLimit,
+  TreasuryPreview,
   TxResult,
 } from "./types.js";

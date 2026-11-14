@@ -1,12 +1,25 @@
 import { Account, Keypair, Networks, StrKey, Transaction, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
+  AlreadyApprovedError,
+  AlreadyExecutedError,
   ConfigError,
+  DuplicateApproverError,
+  InvalidAmountError,
   InvalidInputError,
+  InvalidPolicyError,
+  InvalidTtlError,
+  NoPolicyError,
+  NotEnoughApprovalsError,
+  NotInitializedError,
   NotOwnerError,
   OverLimitError,
+  OverflowError,
+  ProposalExpiredError,
+  ProposalNotFoundError,
   SimulationError,
   StellarTreasuryError,
+  TooManyPoliciesError,
   TransactionFailedError,
   TransactionTimeoutError,
   TreasuryClient,
@@ -495,5 +508,171 @@ describe("errors", () => {
     expect(err).toBeInstanceOf(StellarTreasuryError);
     expect(err).toBeInstanceOf(Error);
     expect(err.name).toBe("OverLimitError");
+  });
+});
+
+describe("preview", () => {
+  it("previews each write call with expected outcome and fee without signing or sending", async () => {
+    const signSpy = vi.fn(async (txXdr: string) => txXdr);
+    const server = fakeServer({
+      simulateTransaction: vi.fn(async (tx: Transaction) => {
+        const { name } = callOf(tx);
+        if (name === "propose") {
+          return {
+            minResourceFee: "54000",
+            result: { retval: nativeToScVal(9n, { type: "u64" }) },
+          };
+        }
+        return {
+          minResourceFee: "32000",
+          result: { retval: xdr.ScVal.scvVoid() },
+        };
+      }),
+    });
+    const c = new TreasuryClient({
+      contractId: CONTRACT,
+      networkPassphrase: Networks.TESTNET,
+      server,
+      fee: "250",
+      signer: { publicKey: alice.publicKey(), signTransaction: signSpy },
+    });
+
+    const proposed = await c.preview.propose({ asset: ASSET, to: bob.publicKey(), amount: 1_000n });
+    expect(proposed).toEqual({ ok: true, value: 9n, fee: 54_250n, resourceFee: 54_000n });
+
+    const approved = await c.preview.approve(9);
+    expect(approved).toEqual({ ok: true, value: undefined, fee: 32_250n, resourceFee: 32_000n });
+
+    const executed = await c.preview.execute(9);
+    expect(executed).toEqual({ ok: true, value: undefined, fee: 32_250n, resourceFee: 32_000n });
+
+    const limitSet = await c.preview.setSpendLimit({
+      approvers: [alice.publicKey(), bob.publicKey()],
+      asset: ASSET,
+      limit: 5_000n,
+      periodSeconds: 3600,
+    });
+    expect(limitSet).toEqual({ ok: true, value: undefined, fee: 32_250n, resourceFee: 32_000n });
+
+    const limitRemoved = await c.preview.removeSpendLimit({
+      approvers: [alice.publicKey(), bob.publicKey()],
+      asset: ASSET,
+    });
+    expect(limitRemoved).toEqual({ ok: true, value: undefined, fee: 32_250n, resourceFee: 32_000n });
+
+    const simulatedNames = server.simulateTransaction.mock.calls.map(
+      (call) => callOf(call[0] as Transaction).name,
+    );
+    expect(simulatedNames).toEqual([
+      "propose",
+      "approve",
+      "execute",
+      "set_spend_limit",
+      "remove_spend_limit",
+    ]);
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(server.getAccount).not.toHaveBeenCalled();
+    expect(server.prepareTransaction).not.toHaveBeenCalled();
+    expect(server.sendTransaction).not.toHaveBeenCalled();
+    expect(server.pollTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [2, NotInitializedError],
+    [6, NotOwnerError],
+    [7, NotEnoughApprovalsError],
+    [8, InvalidAmountError],
+    [9, NoPolicyError],
+    [10, OverLimitError],
+    [11, ProposalNotFoundError],
+    [12, AlreadyApprovedError],
+    [13, AlreadyExecutedError],
+    [14, ProposalExpiredError],
+    [15, InvalidTtlError],
+    [16, TooManyPoliciesError],
+    [17, InvalidPolicyError],
+    [18, DuplicateApproverError],
+    [19, OverflowError],
+  ])("returns typed contract error #%i without throwing or signing", async (code, ErrorType) => {
+    const signSpy = vi.fn(async (txXdr: string) => txXdr);
+    const server = fakeServer({
+      simulateTransaction: vi.fn(async () => ({
+        error: `HostError: Error(Contract, #${code})`,
+        minResourceFee: "15000",
+      })),
+    });
+    const c = new TreasuryClient({
+      contractId: CONTRACT,
+      networkPassphrase: Networks.TESTNET,
+      server,
+      signer: { publicKey: alice.publicKey(), signTransaction: signSpy },
+    });
+
+    const outcome = await c.preview.execute(1);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toBeInstanceOf(ErrorType);
+      expect(outcome.fee).toBe(15_100n);
+      expect(outcome.resourceFee).toBe(15_000n);
+    }
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(server.sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it("wraps non-contract simulation failures as SimulationError", async () => {
+    const server = fakeServer({
+      simulateTransaction: vi.fn(async () => ({ error: "ledger entry archived" })),
+    });
+    const outcome = await client(server).preview.approve(1);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toBeInstanceOf(SimulationError);
+      expect(outcome.error.message).toBe("ledger entry archived");
+      expect(outcome.fee).toBe(100n);
+      expect(outcome.resourceFee).toBe(0n);
+    }
+  });
+
+  it("works on a read-only client when caller is passed, and requires an account otherwise", async () => {
+    const server = fakeServer({
+      simulateTransaction: vi.fn(async () => ({
+        minResourceFee: "9000",
+        result: { retval: nativeToScVal(0n, { type: "u64" }) },
+      })),
+    });
+    const readOnly = client(server, false);
+
+    await expect(readOnly.preview.execute(0)).rejects.toBeInstanceOf(ConfigError);
+    await expect(
+      readOnly.preview.propose({ asset: ASSET, to: bob.publicKey(), amount: 500n }),
+    ).rejects.toBeInstanceOf(ConfigError);
+    expect(server.simulateTransaction).not.toHaveBeenCalled();
+
+    const okPropose = await readOnly.preview.propose(
+      { asset: ASSET, to: bob.publicKey(), amount: 500n },
+      { caller: alice.publicKey() },
+    );
+    expect(okPropose).toEqual({ ok: true, value: 0n, fee: 9_100n, resourceFee: 9_000n });
+
+    // Policy limit previews do not pass an owner argument, so they work without signer or caller.
+    const okRemove = await readOnly.preview.removeSpendLimit({
+      approvers: [alice.publicKey(), bob.publicKey()],
+      asset: ASSET,
+    });
+    expect(okRemove.ok).toBe(true);
+  });
+
+  it("validates inputs before touching the network", async () => {
+    const server = fakeServer();
+    const c = client(server);
+
+    await expect(
+      c.preview.propose({ asset: ASSET, to: bob.publicKey(), amount: 0 }),
+    ).rejects.toBeInstanceOf(InvalidInputError);
+    await expect(c.preview.approve(-1)).rejects.toBeInstanceOf(InvalidInputError);
+    await expect(c.preview.execute("not-a-number")).rejects.toBeInstanceOf(InvalidInputError);
+    await expect(c.preview.execute(1, { caller: CONTRACT })).rejects.toBeInstanceOf(InvalidInputError);
+    await expect(c.preview.execute(1, { caller: "bad" })).rejects.toBeInstanceOf(InvalidInputError);
+    expect(server.simulateTransaction).not.toHaveBeenCalled();
   });
 });
